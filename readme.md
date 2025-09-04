@@ -1,5 +1,5 @@
 游戏介绍:
-1. 2.5d minecraft/roblox 游戏开发
+1. 2.5D Minecraft/Roblox 融合风格游戏,吸收两者优势特点
 2. 使用love2d引擎和fennel语言做mod
     1. 确定好mod和主程序的分界线,游戏能完美支持多个mod的,且不影响主程序
     2. 考虑到未来替换love2d的可能性
