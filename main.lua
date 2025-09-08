@@ -101,7 +101,7 @@ end
 -- ==============================
 function love.load()
     for _, m in ipairs(modules) do
-        if m.init then m.init() end
+        if m.load then m.load() end
     end
 end
 
@@ -112,7 +112,7 @@ function love.update(dt)
         if t ~= fnl_mod_times[f] then
             fnl_mod_times[f] = t
             modules[i] = fennel.dofile(f)
-            if modules[i].init then modules[i].init() end
+            if modules[i].load then modules[i].load() end
             print("Reloaded Fennel:", f)
         end
     end
@@ -123,7 +123,7 @@ function love.update(dt)
             local modname = f:gsub("src/", "src."):gsub("%.lua$", "")
             package.loaded[modname] = nil
             modules[#modules+1] = require(modname)
-            if modules[#modules].init then modules[#modules].init() end
+            if modules[#modules].load then modules[#modules].load() end
             print("Reloaded Lua:", f)
         end
     end

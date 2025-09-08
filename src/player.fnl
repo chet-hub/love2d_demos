@@ -1,7 +1,7 @@
 (local love (require :love))
 
-(fn init []
-  (print "Player from Fennel!"))
+(fn load []
+  (print ""))
 
 (fn update [dt]
   ;; nothing
@@ -9,6 +9,6 @@
 )
 
 (fn draw []
-  (love.graphics.print "I am player" 100 100))
+  (love.graphics.print "" 100 100))
 
-{:init init :update update :draw draw}
+{:load load :update update :draw draw}
