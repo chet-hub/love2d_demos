@@ -85,47 +85,63 @@ return game
 
 ### Fennel 版本
 ```lua 
-(fn love.load []
-  (set player {:x 100 :y 400 :w 32 :h 32 :speed 200 :vy 0 :jump -400 :on-ground true})
-  (set gravity 800)
-  (set platforms [{:x 0 :y 500 :w 800 :h 100}])
-  (set coins [{:x 300 :y 400 :r 10}]))
 
-(fn love.update [dt]
+(local love (require "love"))
+(local game {})
+
+(fn load [] 
+    (set game.player {:x 100 :y 100 :w 32 :h 32 :speed 200 :vy 0 :jump -400 :on_ground true}) 
+    (set game.gravity 800)
+    (set game.platforms [{:x 0 :y 500 :w 800 :h 100}])
+    (set game.coins [{:x 300 :y 400 :r 10}]))
+
+(fn update [dt]
   ;; 玩家移动
-  (when (: love.keyboard :isDown "left")
-    (set player.x (- player.x (* player.speed dt))))
-  (when (: love.keyboard :isDown "right")
-    (set player.x (+ player.x (* player.speed dt))))
-  (when (and (: love.keyboard :isDown "space") player.on-ground)
-    (set player.vy player.jump)
-    (set player.on-ground false))
-  ;; 物理
-  (set player.vy (+ player.vy (* gravity dt)))
-  (set player.y (+ player.y (* player.vy dt)))
-  ;; 平台碰撞
-  (set player.on-ground false)
-  (each [_ platform platforms]
-    (when (and (> (+ player.x player.w) platform.x)
-               (< player.x (+ platform.x platform.w))
-               (> (+ player.y player.h) platform.y)
-               (< player.y (+ platform.y platform.h))
-               (> player.vy 0))
-      (set player.y (- platform.y player.h))
-      (set player.vy 0)
-      (set player.on-ground true)))
-  ;; 金币收集
-  (for [i (length coins) 1 -1]
-    (let [coin (. coins i)]
-      (when (< (math.sqrt (+ (^ (- player.x coin.x) 2) (^ (- player.y coin.y) 2)))
-               (+ coin.r player.w))
-        (table.remove coins i)))))
+  (when (love.keyboard.isDown "left")
+    (set game.player.x (- game.player.x (* game.player.speed dt))))
+  (when (love.keyboard.isDown "right")
+    (set game.player.x (+ game.player.x (* game.player.speed dt))))
+  (when (and (love.keyboard.isDown "space") game.player.on_ground)
+    (set game.player.vy game.player.jump)
+    (set game.player.on_ground false))
 
-(fn love.draw []
-  (: love.graphics :rectangle "fill" player.x player.y player.w player.h)
-  (each [_ platform platforms]
-    (: love.graphics :rectangle "fill" platform.x platform.y platform.w platform.h))
-  (each [_ coin coins]
-    (: love.graphics :circle "fill" coin.x coin.y coin.r)))
+  ;; 物理
+  (set game.player.vy (+ game.player.vy (* game.gravity dt)))
+  (set game.player.y (+ game.player.y (* game.player.vy dt)))
+
+  ;; 平台碰撞
+  (set game.player.on_ground false)
+  (each [_ platform (ipairs game.platforms)]
+    (when (and
+            (> (+ game.player.x game.player.w) platform.x)
+            (< game.player.x (+ platform.x platform.w))
+            (> (+ game.player.y game.player.h) platform.y)
+            (< game.player.y (+ platform.y platform.h))
+            (> game.player.vy 0))
+      (set game.player.y (- platform.y game.player.h))
+      (set game.player.vy 0)
+      (set game.player.on_ground true)))
+
+  ;; 金币收集（倒序遍历）
+  (for [i (length game.coins) 1 -1]
+    (let [coin (. game.coins i)]
+      (when (< (math.sqrt (+ (^ (- game.player.x coin.x) 2)
+                             (^ (- game.player.y coin.y) 2)))
+               (+ coin.r game.player.w))
+        (table.remove game.coins i)))))
+
+
+
+(fn draw []
+  (love.graphics.rectangle "fill" game.player.x game.player.y game.player.w game.player.h)
+  (each [_ platform (ipairs game.platforms)]
+    (love.graphics.rectangle "fill" platform.x platform.y platform.w platform.h))
+  (each [_ coin (ipairs game.coins)]
+    (love.graphics.circle "fill" coin.x coin.y coin.r))
+)
+
+
+{:load load :update update :draw draw}
+
 
 ```

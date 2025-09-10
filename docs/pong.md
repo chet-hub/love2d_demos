@@ -102,14 +102,14 @@ return Pong
 
 (fn update [dt]
   ;; 玩家 1 移动（用静态方法调用，避免动态 :isDown 潜在问题）
-  (when (love.keyboard.isDown love.keyboard "w")
+  (when (love.keyboard.isDown "w")
     (set paddle1.y (- paddle1.y (* paddle1.speed dt))))
-  (when (love.keyboard.isDown love.keyboard "s")
+  (when (love.keyboard.isDown "s")
     (set paddle1.y (+ paddle1.y (* paddle1.speed dt))))
   ;; 玩家 2 移动
-  (when (love.keyboard.isDown love.keyboard "up")
+  (when (love.keyboard.isDown "up")
     (set paddle2.y (- paddle2.y (* paddle2.speed dt))))
-  (when (love.keyboard.isDown love.keyboard "down")
+  (when (love.keyboard.isDown "down")
     (set paddle2.y (+ paddle2.y (* paddle2.speed dt))))
   ;; 球移动
   (set ball.x (+ ball.x (* ball.dx dt)))
