@@ -1,147 +1,302 @@
-local fennel = require("fennel")
-fennel.path = fennel.path .. ";src/?.fnl"
+-- main.lua - Product-Grade 2D Minecraft-like Framework
+-- Features: Concord ECS, Chunk System, Mod Loading, Camera, Persistence
+-- Scans mods/*/init.lua and mods/*/init.fnl, compiles Fennel to Lua if needed
+-- Run: love .
+
+-- Optional Fennel support
+local fennel
+local has_fennel, fennel_module = pcall(require, "lib.fennel")
+if has_fennel then
+    fennel = fennel_module
+    debug.traceback = fennel.traceback
+end
 
 local love = require("love")
+local concord = require("lib.concord")
 
--- ==============================
--- 全局资源表
--- ==============================
-_G.Assets = {images={}, sounds={}, mod_times={}}
+-- Initialize Concord
+concord.init({ useEvents = true })
+local world = concord.world()
 
--- ==============================
--- 辅助函数：递归扫描目录
--- ==============================
-local function scan_dir(dir, ext, filelist)
-    filelist = filelist or {}
-    for _, file in ipairs(love.filesystem.getDirectoryItems(dir)) do
-        local path = dir.."/"..file
-        local info = love.filesystem.getInfo(path)
+-- Configuration
+local config = {
+    tile_size = 32,
+    chunk_size = 16,
+    view_distance = 5,
+    save_dir = "saves/",
+    debug_mode = true,
+    hot_reload_key = "f5"
+}
+
+local function load_config()
+    local config_file = "config.json"
+    local info = love.filesystem.getInfo(config_file)
+    if info then
+        local ok, data = pcall(loadstring("return " .. love.filesystem.read(config_file)))
+        if ok and data then
+            config = data or config
+        end
+    end
+end
+
+-- Chunk System
+local chunks = {}
+local loaded_chunks = {}
+
+local function chunk_key(cx, cy)
+    return cx .. "," .. cy
+end
+
+local function load_chunk(cx, cy)
+    local key = chunk_key(cx, cy)
+    local save_file = config.save_dir .. key .. ".lua"
+    if not chunks[key] then
+        local chunk = {
+            tiles = {},
+            entities = {},
+            dirty = false
+        }
+        for lx = 1, config.chunk_size do
+            chunk.tiles[lx] = {}
+            for ly = 1, config.chunk_size do
+                chunk.tiles[lx][ly] = nil
+            end
+        end
+        local info = love.filesystem.getInfo(save_file)
         if info then
-            if info.type == "file" and file:match("%."..ext.."$") then
-                table.insert(filelist, path)
-            elseif info.type == "directory" then
-                scan_dir(path, ext, filelist)
+            local ok, data = pcall(loadstring(love.filesystem.read(save_file)))
+            if ok and data then
+                chunk.tiles = data.tiles or chunk.tiles
+            end
+        end
+        chunks[key] = chunk
+        world:emit("generate-chunk", cx, cy, key)
+    end
+    loaded_chunks[key] = true
+end
+
+local function unload_chunk(cx, cy)
+    local key = chunk_key(cx, cy)
+    local chunk = chunks[key]
+    if chunk and chunk.dirty then
+        love.filesystem.write(config.save_dir .. key .. ".lua", "return " .. table_to_string({ tiles = chunk.tiles }))
+    end
+    loaded_chunks[key] = nil
+    world:emit("unload-chunk", cx, cy, chunk)
+end
+
+local function get_tile(wx, wy)
+    local cx = math.floor(wx / config.chunk_size)
+    local cy = math.floor(wy / config.chunk_size)
+    local lx = wx % config.chunk_size + 1
+    local ly = wy % config.chunk_size + 1
+    local chunk = chunks[chunk_key(cx, cy)]
+    return chunk and chunk.tiles[lx][ly]
+end
+
+local function set_tile(wx, wy, val)
+    local cx = math.floor(wx / config.chunk_size)
+    local cy = math.floor(wy / config.chunk_size)
+    local lx = wx % config.chunk_size + 1
+    local ly = wy % config.chunk_size + 1
+    local key = chunk_key(cx, cy)
+    local chunk = chunks[key]
+    if not chunk then
+        load_chunk(cx, cy)
+        chunk = chunks[key]
+    end
+    chunk.tiles[lx][ly] = val
+    chunk.dirty = true
+end
+
+-- Utility: Serialize table to Lua string (for saves)
+local function table_to_string(t)
+    local str = "{"
+    for k, v in pairs(t) do
+        if type(k) == "string" then
+            k = string.format("[%q]", k)
+        end
+        if type(v) == "table" then
+            v = table_to_string(v)
+        elseif type(v) == "string" then
+            v = string.format("%q", v)
+        elseif v == nil then
+            v = "nil"
+        end
+        str = str .. k .. "=" .. tostring(v) .. ","
+    end
+    return str .. "}"
+end
+
+-- Mod API
+local api = {
+    config = config,
+    world = world,
+    load_chunk = load_chunk,
+    unload_chunk = unload_chunk,
+    get_tile = get_tile,
+    set_tile = set_tile,
+    emit = function(evt, ...)
+        world:emit(evt, ...)
+    end,
+    register_block = function(type, props)
+        world:emit("register-block", type, props)
+    end,
+    register_entity_type = function(type, prefab_fn)
+        world:emit("register-entity-type", type, prefab_fn)
+    end,
+    register_item = function(type, props)
+        world:emit("register-item", type, props)
+    end,
+    register_recipe = function(recipe)
+        world:emit("register-recipe", recipe)
+    end
+}
+
+-- Mod Loading with Fennel Compilation
+local mods = {}  -- {mod-name: {init: fn, reloaded: bool, path: string}}
+
+local function load_mod(mod_dir)
+    local lua_path = "mods/" .. mod_dir .. "/init.lua"
+    local fnl_path = "mods/" .. mod_dir .. "/init.fnl"
+    local lua_info = love.filesystem.getInfo(lua_path)
+    local fnl_info = love.filesystem.getInfo(fnl_path)
+    local mod_path, mod_loader
+
+    if lua_info then
+        mod_path = "mods." .. mod_dir .. ".init"
+        mod_loader = require
+    elseif fnl_info and has_fennel then
+        mod_path = fnl_path
+        mod_loader = function(path)
+            local code = love.filesystem.read(path)
+            local lua_code = fennel.compileString(code, { filename = path })
+            local chunk, err = loadstring(lua_code, path)
+            if not chunk then
+                if config.debug_mode then print("Fennel compile error for " .. path .. ": " .. err) end
+                return nil
+            end
+            return chunk()
+        end
+    else
+        if config.debug_mode then print("No init.lua or init.fnl found for mod " .. mod_dir) end
+        return
+    end
+
+    local ok, mod_module = pcall(mod_loader, mod_path)
+    if ok and mod_module and mod_module.init then
+        local init_ok, err = pcall(mod_module.init, api)
+        if init_ok then
+            mods[mod_dir] = { init = mod_module.init, reloaded = false, path = mod_path }
+        elseif config.debug_mode then
+            print("Mod " .. mod_dir .. " init error: " .. err)
+        end
+    elseif config.debug_mode then
+        print("Mod " .. mod_dir .. " load error: " .. (ok and "no init function" or mod_module))
+    end
+end
+
+local function reload_mod(mod_name)
+    local mod = mods[mod_name]
+    if mod then
+        package.loaded[mod.path] = nil
+        local ok, new_module = pcall(require, mod.path)
+        if ok and new_module and new_module.init then
+            local reload_ok, err = pcall(new_module.init, api)
+            if reload_ok then
+                mod.init = new_module.init
+                mod.reloaded = true
+                world:emit("mod-reloaded", mod_name)
+            elseif config.debug_mode then
+                print("Reload error for " .. mod_name .. ": " .. err)
+            end
+        elseif config.debug_mode then
+            print("Reload failed for " .. mod_name .. ": " .. (ok and "no init function" or new_module))
+        end
+    end
+end
+
+local function load_mods()
+    local mod_dirs = love.filesystem.getDirectoryItems("mods")
+    for _, dir in ipairs(mod_dirs) do
+        load_mod(dir)
+    end
+    world:emit("mods-loaded")
+end
+
+-- Camera System
+local camera = { x = 0, y = 0, scale = 1 }
+
+local camera_system = concord.system({
+    players = { "player", "position" },
+    update = function(self, dt)
+        if #self.players > 0 then
+            local pos = self.players[1]:get("position").pos
+            local w = love.graphics.getWidth()
+            local h = love.graphics.getHeight()
+            camera.x = pos.x - w / 2
+            camera.y = pos.y - h / 2
+        end
+    end
+})
+
+-- Chunk Management System
+local chunk_system = concord.system({
+    players = { "player", "position" },
+    update = function(self, dt)
+        if #self.players > 0 then
+            local pos = self.players[1]:get("position").pos
+            local pcx = math.floor(pos.x / (config.chunk_size * config.tile_size))
+            local pcy = math.floor(pos.y / (config.chunk_size * config.tile_size))
+            for cx = pcx - config.view_distance, pcx + config.view_distance do
+                for cy = pcy - config.view_distance, pcy + config.view_distance do
+                    load_chunk(cx, cy)
+                end
+            end
+            for key, _ in pairs(loaded_chunks) do
+                local cx, cy = key:match("(-?%d+),(-?%d+)")
+                cx, cy = tonumber(cx), tonumber(cy)
+                if math.abs(cx - pcx) > config.view_distance * 1.5 or math.abs(cy - pcy) > config.view_distance * 1.5 then
+                    unload_chunk(cx, cy)
+                end
             end
         end
     end
-    return filelist
-end
+})
 
--- ==============================
--- 文件修改时间
--- ==============================
-local function get_modtime(path)
-    local info = love.filesystem.getInfo(path)
-    return info and info.modtime or 0
-end
-
--- ==============================
--- 资源加载函数
--- ==============================
-local function load_assets()
-    -- 图片
-    local pngs = scan_dir("assets","png")
-    for _, path in ipairs(pngs) do
-        local t = get_modtime(path)
-        if _G.Assets.mod_times[path] ~= t then
-            _G.Assets.images[path] = love.graphics.newImage(path)
-            _G.Assets.mod_times[path] = t
-            print("Loaded image:", path)
-        end
-    end
-    -- 音效
-    local wvs = scan_dir("assets","wav")
-    for _, path in ipairs(wvs) do
-        local t = get_modtime(path)
-        if _G.Assets.mod_times[path] ~= t then
-            _G.Assets.sounds[path] = love.audio.newSource(path,"static")
-            _G.Assets.mod_times[path] = t
-            print("Loaded sound:", path)
-        end
-    end
-end
-
-load_assets()
-
--- ==============================
--- 模块加载和热重载
--- ==============================
-local fnl_files = scan_dir("src", "fnl")
-local lua_files = scan_dir("src", "lua")
-
-local fnl_mod_times = {}
-local lua_mod_times = {}
-
-local modules = {}
-
-local function load_fnl(f)
-    local mod = fennel.dofile(f)
-    table.insert(modules, mod)
-end
-
-local function load_lua(f)
-    local modname = f:gsub("src/", "src."):gsub("%.lua$", "")
-    package.loaded[modname] = nil
-    local mod = require(modname)
-    table.insert(modules, mod)
-end
-
--- 初始化模块
-for _, f in ipairs(fnl_files) do
-    fnl_mod_times[f] = get_modtime(f)
-    load_fnl(f)
-end
-for _, f in ipairs(lua_files) do
-    lua_mod_times[f] = get_modtime(f)
-    load_lua(f)
-end
-
--- ==============================
--- Love2D 回调
--- ==============================
-function love.load()
-    for _, m in ipairs(modules) do
-        if m.load then m.load() end
-    end
+-- Love2D Callbacks
+function love.load(args)
+    load_config()
+    love.filesystem.createDirectory(config.save_dir)
+    world:addSystem(camera_system)
+    world:addSystem(chunk_system)
+    load_mods()
 end
 
 function love.update(dt)
-    -- 模块热重载
-    for i, f in ipairs(fnl_files) do
-        local t = get_modtime(f)
-        if t ~= fnl_mod_times[f] then
-            fnl_mod_times[f] = t
-            modules[i] = fennel.dofile(f)
-            if modules[i].load then modules[i].load() end
-            print("Reloaded Fennel:", f)
-        end
-    end
-    for i, f in ipairs(lua_files) do
-        local t = get_modtime(f)
-        if t ~= lua_mod_times[f] then
-            lua_mod_times[f] = t
-            local modname = f:gsub("src/", "src."):gsub("%.lua$", "")
-            package.loaded[modname] = nil
-            modules[#modules+1] = require(modname)
-            if modules[#modules].load then modules[#modules].load() end
-            print("Reloaded Lua:", f)
-        end
-    end
-
-    -- 资源热重载
-    load_assets()
-
-    -- 调用 update
-    for _, m in ipairs(modules) do
-        if m.update then m.update(dt) end
-    end
+    world:update(dt)
 end
 
 function love.draw()
-    -- 清屏，避免残影
-    love.graphics.clear(0.1,0.1,0.1) -- 可改背景色
+    love.graphics.push()
+    love.graphics.translate(-camera.x, -camera.y)
+    love.graphics.scale(camera.scale)
+    world:draw()
+    love.graphics.pop()
+end
 
-    for _, m in ipairs(modules) do
-        if m.draw then m.draw() end
+function love.keypressed(key)
+    world:emit("keypressed", key)
+    if key == config.hot_reload_key then
+        for mod_name, _ in pairs(mods) do
+            reload_mod(mod_name)
+        end
+    end
+end
+
+function love.errhand(msg)
+    print("Error: " .. msg)
+    if config.debug_mode then
+        love.system.openURL("https://love2d.org/wiki")
     end
 end
