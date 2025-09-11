@@ -1,45 +1,64 @@
--- Core Mod - 提供基础 Tile 系统和世界管理
--- mods/core/init.lua
-
+-- Core mod: provides tile, chunk, world, and ECS systems
 local core = {
     name = "core",
     version = "1.0.0",
-    description = "2D Minecraft 核心系统"
+    description = "2D Minecraft core systems"
 }
 
--- Mod 初始化
+-- Initialize the mod
 function core:init(ctx)
+    -- Store context
     self.ctx = ctx
     self.kernel = ctx.kernel
     
-    -- 初始化子系统
+    -- Check Love2D dependency
+    if not love or not love.filesystem then
+        error("[Core] Critical error: Love2D not found")
+    end
+    
+    -- Check Concord ECS dependency
+    local concord = self.ctx.kernel.modules.concord or require("lib.concord")
+    if not concord then
+        error("[Core] Critical error: Concord ECS library not found")
+    end
+    print("[Core] Concord ECS loaded successfully: " .. tostring(concord))
+    
+    -- Initialize subsystems
+    print("[Core] Starting initialization")
     self:initTileSystem()
-    self:initWorldSystem()
+    print("[Core] Tile system initialized")
     self:initChunkSystem()
+    print("[Core] Chunk system initialized")
+    self:initWorldSystem()
+    print("[Core] World system initialized")
     self:initRegistry()
+    print("[Core] Registry initialized")
     self:initSystems()
+    print("[Core] ECS systems initialized")
     self:initNetworking()
+    print("[Core] Network system initialized")
     
-    -- 注册事件监听
+    -- Register event listeners
     self:registerEvents()
+    print("[Core] Event system initialized")
     
-    print("[Core] Initialized")
+    print("[Core] Initialization completed")
 end
 
--- Tile 注册表
+-- Tile registry: manages tile, item, entity definitions
 function core:initRegistry()
     self.registry = {
-        tiles = {},
-        items = {},
-        entities = {},
-        biomes = {},
-        dimensions = {}
+        tiles = {},            -- Tile definitions
+        items = {},            -- Item definitions (unused)
+        entities = {},         -- Entity definitions (unused)
+        biomes = {},           -- Biome definitions (unused)
+        dimensions = {}        -- Dimension definitions (unused)
     }
     
-    -- 暴露注册 API 给其他 Mod
+    -- Expose registry to other mods
     self.ctx.kernel.registry = self.registry
     
-    -- 注册 Tile 的 API
+    -- API to register tiles
     function self.registry:registerTile(id, definition)
         self.tiles[id] = {
             id = id,
@@ -59,27 +78,24 @@ function core:initRegistry()
         return self.tiles[id]
     end
     
-    -- 注册基础 Tiles
+    -- Register basic tiles
     self.registry:registerTile("air", {
         name = "Air",
         solid = false,
         transparent = true,
         hardness = 0
     })
-    
     self.registry:registerTile("stone", {
         name = "Stone",
         texture = "stone.png",
         hardness = 1.5,
         drops = {"cobblestone"}
     })
-    
     self.registry:registerTile("dirt", {
         name = "Dirt",
         texture = "dirt.png",
         hardness = 0.5
     })
-    
     self.registry:registerTile("grass", {
         name = "Grass Block",
         texture = "grass.png",
@@ -88,11 +104,13 @@ function core:initRegistry()
     })
 end
 
--- Tile 系统
+-- Tile system: manages tile creation and operations
 function core:initTileSystem()
-    local TileSystem = {}
+    local TileSystem = {
+        kernel = self.ctx.kernel -- Store kernel reference for event access
+    }
     
-    -- Tile 数据结构
+    -- Create tile data structure
     function TileSystem:createTile(id, x, y, metadata)
         return {
             id = id or "air",
@@ -104,39 +122,36 @@ function core:initTileSystem()
         }
     end
     
-    -- Tile 操作
+    -- Place a tile
     function TileSystem:placeTile(world, x, y, tile_id, metadata)
         local chunk = world:getChunkAt(x, y)
         if chunk then
             local lx, ly = world:worldToLocal(x, y)
             chunk:setTile(lx, ly, tile_id, metadata)
-            
-            -- 触发放置事件
-            self.ctx.events:emit("tile.place", {
+            -- Emit tile placement event using kernel.events
+            self.kernel.events:enqueue("tile.place", {
                 x = x, y = y,
                 tile = tile_id,
                 metadata = metadata
             })
-            
             return true
         end
         return false
     end
     
+    -- Break a tile
     function TileSystem:breakTile(world, x, y)
         local chunk = world:getChunkAt(x, y)
         if chunk then
             local lx, ly = world:worldToLocal(x, y)
             local tile = chunk:getTile(lx, ly)
-            
             if tile and tile.id ~= "air" then
-                -- 触发破坏事件
-                self.ctx.events:emit("tile.break", {
+                -- Emit tile break event using kernel.events
+                self.kernel.events:enqueue("tile.break", {
                     x = x, y = y,
                     tile = tile.id,
-                    drops = self.registry.tiles[tile.id].drops
+                    drops = self.kernel.registry.tiles[tile.id].drops
                 })
-                
                 chunk:setTile(lx, ly, "air")
                 return true
             end
@@ -145,26 +160,27 @@ function core:initTileSystem()
     end
     
     self.tileSystem = TileSystem
+    self.ctx.kernel.tileSystem = TileSystem
 end
 
--- 区块系统
+-- Chunk system: manages chunk data and generation
 function core:initChunkSystem()
     local Chunk = {}
     Chunk.__index = Chunk
     
     function Chunk:new(cx, cy, size)
+        -- Create a new chunk
         local chunk = {
-            cx = cx,
-            cy = cy,
-            size = size or 16,
-            tiles = {},
-            entities = {},
-            dirty = true,
-            loaded = false,
-            generation_seed = 0
+            cx = cx,           -- Chunk X coordinate
+            cy = cy,           -- Chunk Y coordinate
+            size = size or 16, -- Chunk size (default 16x16)
+            tiles = {},        -- Tile array
+            entities = {},     -- Entity list (unused)
+            dirty = true,      -- Needs redraw
+            loaded = false     -- Loaded status
         }
         
-        -- 初始化 Tile 数组
+        -- Initialize tile array
         for x = 0, chunk.size - 1 do
             chunk.tiles[x] = {}
             for y = 0, chunk.size - 1 do
@@ -180,15 +196,15 @@ function core:initChunkSystem()
     end
     
     function Chunk:generate(generator)
+        -- Generate chunk content
         if generator then
             generator(self)
         else
-            -- 默认生成器（简单地形）
+            -- Default generator: simple terrain
             for x = 0, self.size - 1 do
                 for y = 0, self.size - 1 do
                     local wx = self.cx * self.size + x
                     local wy = self.cy * self.size + y
-                    
                     if wy > 10 then
                         self.tiles[x][y].id = "stone"
                     elseif wy > 5 then
@@ -203,6 +219,7 @@ function core:initChunkSystem()
     end
     
     function Chunk:getTile(x, y)
+        -- Get tile at specified position
         if x >= 0 and x < self.size and y >= 0 and y < self.size then
             return self.tiles[x][y]
         end
@@ -210,6 +227,7 @@ function core:initChunkSystem()
     end
     
     function Chunk:setTile(x, y, tile_id, metadata)
+        -- Set tile at specified position
         if x >= 0 and x < self.size and y >= 0 and y < self.size then
             self.tiles[x][y] = {
                 id = tile_id,
@@ -221,118 +239,99 @@ function core:initChunkSystem()
         return false
     end
     
-    function Chunk:save()
-        -- 序列化区块数据
-        local data = {
-            cx = self.cx,
-            cy = self.cy,
-            tiles = self.tiles,
-            entities = self.entities
-        }
-        return data
-    end
-    
-    function Chunk:load(data)
-        self.tiles = data.tiles
-        self.entities = data.entities
-        self.dirty = true
-    end
-    
     self.Chunk = Chunk
+    self.ctx.kernel.Chunk = Chunk
 end
 
--- 世界系统
+-- World system: manages chunks and tile operations
 function core:initWorldSystem()
     local World = {}
     World.__index = World
     
     function World:new(name, seed)
+        -- Create a new world
         local world = {
             name = name or "world",
             seed = seed or os.time(),
-            chunks = {},
-            chunk_size = 16,
-            loaded_chunks = {},
-            view_distance = 3,
-            generator = nil,
-            time = 0,
-            weather = "clear"
+            chunks = {},           -- All chunks
+            chunk_size = 16,       -- Chunk size
+            loaded_chunks = {},    -- Loaded chunks
+            view_distance = 3,     -- View distance (chunks)
+            generator = nil,       -- Terrain generator (unused)
+            time = 0,              -- World time
+            weather = "clear"      -- Weather state
         }
         setmetatable(world, World)
         return world
     end
     
     function World:getChunk(cx, cy)
+        -- Get a specific chunk
         local key = cx .. "," .. cy
         return self.chunks[key]
     end
     
     function World:loadChunk(cx, cy)
+        -- Load or create a chunk
         local key = cx .. "," .. cy
-        
         if not self.chunks[key] then
-            -- 创建新区块
-            local chunk = self.Chunk:new(cx, cy, self.chunk_size)
-            
-            -- 尝试从存储加载
+            local chunk = self.ctx.kernel.Chunk:new(cx, cy, self.chunk_size)
             local saved = self:loadChunkFromDisk(cx, cy)
             if saved then
                 chunk:load(saved)
             else
-                -- 生成新区块
                 chunk:generate(self.generator)
             end
-            
             self.chunks[key] = chunk
             self.loaded_chunks[key] = true
-            
-            -- 触发区块加载事件
-            self.ctx.events:emit("chunk.load", {
+            -- Emit chunk load event
+            self.ctx.events:enqueue("chunk.load", {
                 cx = cx, cy = cy,
                 chunk = chunk
             })
         end
-        
         return self.chunks[key]
     end
     
     function World:unloadChunk(cx, cy)
+        -- Unload a chunk
         local key = cx .. "," .. cy
         local chunk = self.chunks[key]
-        
         if chunk then
-            -- 保存区块
             self:saveChunkToDisk(chunk)
-            
-            -- 触发区块卸载事件
-            self.ctx.events:emit("chunk.unload", {
+            self.ctx.events:enqueue("chunk.unload", {
                 cx = cx, cy = cy
             })
-            
             self.chunks[key] = nil
             self.loaded_chunks[key] = nil
         end
     end
     
     function World:getChunkAt(world_x, world_y)
+        -- Get chunk at world coordinates
         local cx = math.floor(world_x / self.chunk_size)
         local cy = math.floor(world_y / self.chunk_size)
         return self:getChunk(cx, cy) or self:loadChunk(cx, cy)
     end
     
     function World:worldToLocal(world_x, world_y)
+        -- Convert world coordinates to local
         local lx = world_x % self.chunk_size
         local ly = world_y % self.chunk_size
+        if lx < 0 then lx = lx + self.chunk_size end
+        if ly < 0 then ly = ly + self.chunk_size end
         return lx, ly
     end
     
     function World:localToWorld(cx, cy, lx, ly)
+        -- Convert local coordinates to world
         local wx = cx * self.chunk_size + lx
         local wy = cy * self.chunk_size + ly
         return wx, wy
     end
     
     function World:getTileAt(world_x, world_y)
+        -- Get tile at world coordinates
         local chunk = self:getChunkAt(world_x, world_y)
         if chunk then
             local lx, ly = self:worldToLocal(world_x, world_y)
@@ -342,6 +341,7 @@ function core:initWorldSystem()
     end
     
     function World:setTileAt(world_x, world_y, tile_id, metadata)
+        -- Set tile at world coordinates
         local chunk = self:getChunkAt(world_x, world_y)
         if chunk then
             local lx, ly = self:worldToLocal(world_x, world_y)
@@ -351,27 +351,24 @@ function core:initWorldSystem()
     end
     
     function World:updateLoadedChunks(center_x, center_y)
+        -- Update loaded chunks
         local ccx = math.floor(center_x / self.chunk_size)
         local ccy = math.floor(center_y / self.chunk_size)
         
-        -- 加载视野内的区块
         for dx = -self.view_distance, self.view_distance do
             for dy = -self.view_distance, self.view_distance do
                 local cx = ccx + dx
                 local cy = ccy + dy
                 local key = cx .. "," .. cy
-                
                 if not self.loaded_chunks[key] then
                     self:loadChunk(cx, cy)
                 end
             end
         end
         
-        -- 卸载远处的区块
         for key, _ in pairs(self.loaded_chunks) do
             local cx, cy = key:match("(-?%d+),(-?%d+)")
             cx, cy = tonumber(cx), tonumber(cy)
-            
             local dist = math.max(math.abs(cx - ccx), math.abs(cy - ccy))
             if dist > self.view_distance + 1 then
                 self:unloadChunk(cx, cy)
@@ -380,26 +377,38 @@ function core:initWorldSystem()
     end
     
     function World:saveChunkToDisk(chunk)
-        -- 这里应该实现实际的存储逻辑
-        -- 可以使用 love.filesystem 保存到本地
+        -- Save chunk to disk (placeholder implementation)
+        print("[Core] Saving chunk (placeholder): " .. chunk.cx .. "," .. chunk.cy)
+        -- TODO: Implement chunk saving logic
     end
     
     function World:loadChunkFromDisk(cx, cy)
-        -- 这里应该实现实际的加载逻辑
+        -- Load chunk from disk (placeholder implementation)
+        print("[Core] Loading chunk from disk (placeholder): " .. cx .. "," .. cy)
         return nil
+        -- TODO: Implement chunk loading logic
     end
     
     self.World = World
-    
-    -- 将 World 暴露给 kernel
     self.ctx.kernel.World = World
+    print("[Core] World system initialized, kernel.World set to: " .. tostring(World))
 end
 
--- ECS 系统
+-- ECS systems: register rendering and physics systems
 function core:initSystems()
     local concord = self.ctx.kernel.modules.concord or require("lib.concord")
+    if not concord then
+        error("[Core] Critical error: Concord ECS library not found")
+    end
     
-    -- 渲染系统
+    -- Register sprite component
+    self.ctx.ecs.components.sprite = concord.component("sprite", function(c, data)
+        c.texture = data.texture
+        c.scale_x = data.scale_x or 1
+        c.scale_y = data.scale_y or 1
+    end)
+    
+    -- Render system: draws entities with position and sprite components
     local RenderSystem = concord.system({
         pool = {"position", "sprite"}
     })
@@ -408,7 +417,6 @@ function core:initSystems()
         for _, entity in ipairs(self.pool) do
             local pos = entity.position
             local sprite = entity.sprite
-            
             if sprite.texture then
                 love.graphics.draw(
                     sprite.texture,
@@ -421,7 +429,7 @@ function core:initSystems()
         end
     end
     
-    -- 物理系统
+    -- Physics system: updates entities with position and velocity components
     local PhysicsSystem = concord.system({
         pool = {"position", "velocity"}
     })
@@ -430,35 +438,27 @@ function core:initSystems()
         for _, entity in ipairs(self.pool) do
             local pos = entity.position
             local vel = entity.velocity
-            
             pos.x = pos.x + vel.vx * dt
             pos.y = pos.y + vel.vy * dt
         end
     end
     
-    -- 区块渲染系统
+    -- Chunk render system: draws tiles in the world
     local ChunkRenderSystem = {}
     
     function ChunkRenderSystem:draw(world, camera)
-        if not world then return end
-        
-        -- 计算可见区块范围
-        local view_left = camera.x - camera.width / 2
-        local view_right = camera.x + camera.width / 2
-        local view_top = camera.y - camera.height / 2
-        local view_bottom = camera.y + camera.height / 2
-        
+        if not world or not camera then
+            print("[Core] ChunkRenderSystem: No world or camera provided, skipping render")
+            return
+        end
         local chunk_size = world.chunk_size
-        local tile_size = 32 -- 像素大小
+        local tile_size = 32
         
-        -- 遍历可见区块
         for key, chunk in pairs(world.chunks) do
             if chunk.dirty then
-                -- 这里可以重建区块的渲染缓存
                 chunk.dirty = false
+                print("[Core] Rendering chunk: (" .. chunk.cx .. "," .. chunk.cy .. ")")
             end
-            
-            -- 渲染区块中的 Tiles
             for x = 0, chunk.size - 1 do
                 for y = 0, chunk.size - 1 do
                     local tile = chunk.tiles[x][y]
@@ -467,9 +467,7 @@ function core:initSystems()
                         local wy = chunk.cy * chunk_size + y
                         local sx = wx * tile_size
                         local sy = wy * tile_size
-                        
-                        -- 简单渲染（用颜色代替纹理）
-                        local tile_def = self.registry.tiles[tile.id]
+                        local tile_def = self.ctx.kernel.registry.tiles[tile.id]
                         if tile_def then
                             if tile.id == "stone" then
                                 love.graphics.setColor(0.5, 0.5, 0.5)
@@ -480,7 +478,6 @@ function core:initSystems()
                             else
                                 love.graphics.setColor(1, 1, 1)
                             end
-                            
                             love.graphics.rectangle("fill", 
                                 sx - camera.x + camera.width/2, 
                                 sy - camera.y + camera.height/2, 
@@ -490,7 +487,6 @@ function core:initSystems()
                 end
             end
         end
-        
         love.graphics.setColor(1, 1, 1)
     end
     
@@ -499,36 +495,39 @@ function core:initSystems()
         physics = PhysicsSystem,
         chunkRender = ChunkRenderSystem
     }
+    
+    -- Register ECS systems to world
+    self.ctx.ecs.world:addSystems(RenderSystem, PhysicsSystem)
 end
 
--- 网络同步
+-- Network synchronization (placeholder interface)
 function core:initNetworking()
-    -- 注册网络消息处理
-    self.ctx.events:on("network.server.start", function(config)
-        print("[Core] Starting server on port " .. (config.port or 25565))
-        
-        -- 初始化服务器世界
-        self.serverWorld = self.World:new("server_world")
-        
-        -- 处理客户端连接
-        self.ctx.events:on("network.client.connected", function(peer)
-            -- 发送世界数据给新客户端
-            self:syncWorldToClient(peer)
-        end)
-    end)
-    
-    self.ctx.events:on("network.client.start", function(config)
-        print("[Core] Connecting to server...")
-        
-        -- 初始化客户端世界
-        self.clientWorld = self.World:new("client_world")
-    end)
-    
-    -- Tile 同步
+    -- Initialize network (placeholder implementation)
+    print("[Core] Network system initialized (placeholder)")
+    -- TODO: Implement enet or other network library logic
+end
+
+-- Register event listeners
+function core:registerEvents()
+    -- Listen for tile placement event
     self.ctx.events:on("tile.place", function(data)
-        if self.ctx.kernel.network.mode == "server" then
-            -- 广播给所有客户端
-            self:broadcastTileChange(data)
-        end
+        print("[Core] Tile placed: (" .. data.x .. "," .. data.y .. ") - " .. data.tile)
+    end)
+    
+    -- Listen for tile break event
+    self.ctx.events:on("tile.break", function(data)
+        print("[Core] Tile broken: (" .. data.x .. "," .. data.y .. ") - " .. data.tile)
+    end)
+    
+    -- Listen for chunk load event
+    self.ctx.events:on("chunk.load", function(data)
+        print("[Core] Chunk loaded: (" .. data.cx .. "," .. data.cy .. ")")
+    end)
+    
+    -- Listen for chunk unload event
+    self.ctx.events:on("chunk.unload", function(data)
+        print("[Core] Chunk unloaded: (" .. data.cx .. "," .. data.cy .. ")")
     end)
 end
+
+return core
