@@ -1,5 +1,5 @@
 -- lib/event_bus.lua - 全局事件总线
-local Signal = require "vendor.signal"
+local Signal = require "vendor.hump.signal"
 
 local EventBus = {}
 local registry = Signal.new()
