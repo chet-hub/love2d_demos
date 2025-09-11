@@ -1,302 +1,418 @@
--- main.lua - Product-Grade 2D Minecraft-like Framework
--- Features: Concord ECS, Chunk System, Mod Loading, Camera, Persistence
--- Scans mods/*/init.lua and mods/*/init.fnl, compiles Fennel to Lua if needed
--- Run: love .
+-- 2D Minecraft 微内核
+-- main.lua - 最小化核心，所有功能通过 Mod 实现
 
--- Optional Fennel support
+local kernel = {}
+
+-- 全局配置
+kernel.config = {
+    version = "0.1.0",
+    debug = true,
+    tick_rate = 60,
+    network = {
+        port = 25565,
+        max_players = 100
+    }
+}
+
+-- 核心模块
+kernel.modules = {}
+kernel.mods = {}
+kernel.systems = {}
+kernel.events = {}
+kernel.hooks = {}
+
+-- Fennel 编译器加载
 local fennel
-local has_fennel, fennel_module = pcall(require, "lib.fennel")
-if has_fennel then
-    fennel = fennel_module
-    debug.traceback = fennel.traceback
+local function loadFennel()
+    local ok, fnl = pcall(require, "lib.fennel")
+    if ok then
+        fennel = fnl
+        -- 配置 Fennel
+        fennel.path = fennel.path .. ";mods/?.fnl;mods/?/init.fnl"
+        table.insert(package.loaders or package.searchers, fennel.searcher)
+        return true
+    end
+    return false
 end
 
-local love = require("love")
-local concord = require("lib.concord")
+-- 智能加载器（优先 .fnl 文件）
+local function smartRequire(path)
+    -- 尝试加载 .fnl 文件
+    if fennel then
+        local fnl_path = path:gsub("%.", "/") .. ".fnl"
+        if love.filesystem.getInfo(fnl_path) then
+            local code = love.filesystem.read(fnl_path)
+            local compiled = fennel.compileString(code)
+            return assert(loadstring(compiled))()
+        end
+        
+        -- 尝试 init.fnl
+        fnl_path = path:gsub("%.", "/") .. "/init.fnl"
+        if love.filesystem.getInfo(fnl_path) then
+            local code = love.filesystem.read(fnl_path)
+            local compiled = fennel.compileString(code)
+            return assert(loadstring(compiled))()
+        end
+    end
+    
+    -- 回退到 Lua
+    return require(path)
+end
 
--- Initialize Concord
-concord.init({ useEvents = true })
-local world = concord.world()
-
--- Configuration
-local config = {
-    tile_size = 32,
-    chunk_size = 16,
-    view_distance = 5,
-    save_dir = "saves/",
-    debug_mode = true,
-    hot_reload_key = "f5"
+-- ECS 系统初始化
+kernel.ecs = {
+    world = nil,
+    systems = {},
+    components = {},
+    assemblages = {}
 }
 
-local function load_config()
-    local config_file = "config.json"
-    local info = love.filesystem.getInfo(config_file)
-    if info then
-        local ok, data = pcall(loadstring("return " .. love.filesystem.read(config_file)))
-        if ok and data then
-            config = data or config
-        end
-    end
+function kernel.ecs:init()
+    local concord = smartRequire("lib.concord")
+    self.world = concord.world()
+    
+    -- 注册核心组件
+    self.components.position = concord.component("position", function(c, x, y)
+        c.x = x or 0
+        c.y = y or 0
+    end)
+    
+    self.components.velocity = concord.component("velocity", function(c, vx, vy)
+        c.vx = vx or 0
+        c.vy = vy or 0
+    end)
+    
+    self.components.tile = concord.component("tile", function(c, id, metadata)
+        c.id = id
+        c.metadata = metadata or {}
+    end)
+    
+    self.components.chunk = concord.component("chunk", function(c, cx, cy)
+        c.cx = cx
+        c.cy = cy
+        c.tiles = {}
+        c.dirty = true
+    end)
+    
+    return self
 end
 
--- Chunk System
-local chunks = {}
-local loaded_chunks = {}
-
-local function chunk_key(cx, cy)
-    return cx .. "," .. cy
-end
-
-local function load_chunk(cx, cy)
-    local key = chunk_key(cx, cy)
-    local save_file = config.save_dir .. key .. ".lua"
-    if not chunks[key] then
-        local chunk = {
-            tiles = {},
-            entities = {},
-            dirty = false
-        }
-        for lx = 1, config.chunk_size do
-            chunk.tiles[lx] = {}
-            for ly = 1, config.chunk_size do
-                chunk.tiles[lx][ly] = nil
-            end
-        end
-        local info = love.filesystem.getInfo(save_file)
-        if info then
-            local ok, data = pcall(loadstring(love.filesystem.read(save_file)))
-            if ok and data then
-                chunk.tiles = data.tiles or chunk.tiles
-            end
-        end
-        chunks[key] = chunk
-        world:emit("generate-chunk", cx, cy, key)
-    end
-    loaded_chunks[key] = true
-end
-
-local function unload_chunk(cx, cy)
-    local key = chunk_key(cx, cy)
-    local chunk = chunks[key]
-    if chunk and chunk.dirty then
-        love.filesystem.write(config.save_dir .. key .. ".lua", "return " .. table_to_string({ tiles = chunk.tiles }))
-    end
-    loaded_chunks[key] = nil
-    world:emit("unload-chunk", cx, cy, chunk)
-end
-
-local function get_tile(wx, wy)
-    local cx = math.floor(wx / config.chunk_size)
-    local cy = math.floor(wy / config.chunk_size)
-    local lx = wx % config.chunk_size + 1
-    local ly = wy % config.chunk_size + 1
-    local chunk = chunks[chunk_key(cx, cy)]
-    return chunk and chunk.tiles[lx][ly]
-end
-
-local function set_tile(wx, wy, val)
-    local cx = math.floor(wx / config.chunk_size)
-    local cy = math.floor(wy / config.chunk_size)
-    local lx = wx % config.chunk_size + 1
-    local ly = wy % config.chunk_size + 1
-    local key = chunk_key(cx, cy)
-    local chunk = chunks[key]
-    if not chunk then
-        load_chunk(cx, cy)
-        chunk = chunks[key]
-    end
-    chunk.tiles[lx][ly] = val
-    chunk.dirty = true
-end
-
--- Utility: Serialize table to Lua string (for saves)
-local function table_to_string(t)
-    local str = "{"
-    for k, v in pairs(t) do
-        if type(k) == "string" then
-            k = string.format("[%q]", k)
-        end
-        if type(v) == "table" then
-            v = table_to_string(v)
-        elseif type(v) == "string" then
-            v = string.format("%q", v)
-        elseif v == nil then
-            v = "nil"
-        end
-        str = str .. k .. "=" .. tostring(v) .. ","
-    end
-    return str .. "}"
-end
-
--- Mod API
-local api = {
-    config = config,
-    world = world,
-    load_chunk = load_chunk,
-    unload_chunk = unload_chunk,
-    get_tile = get_tile,
-    set_tile = set_tile,
-    emit = function(evt, ...)
-        world:emit(evt, ...)
-    end,
-    register_block = function(type, props)
-        world:emit("register-block", type, props)
-    end,
-    register_entity_type = function(type, prefab_fn)
-        world:emit("register-entity-type", type, prefab_fn)
-    end,
-    register_item = function(type, props)
-        world:emit("register-item", type, props)
-    end,
-    register_recipe = function(recipe)
-        world:emit("register-recipe", recipe)
-    end
+-- Actor 消息系统
+kernel.actor = {
+    actors = {},
+    messages = {},
+    handlers = {}
 }
 
--- Mod Loading with Fennel Compilation
-local mods = {}  -- {mod-name: {init: fn, reloaded: bool, path: string}}
+function kernel.actor:spawn(id, actor_type, data)
+    local actor = {
+        id = id,
+        type = actor_type,
+        data = data or {},
+        mailbox = {},
+        handlers = {}
+    }
+    self.actors[id] = actor
+    return actor
+end
 
-local function load_mod(mod_dir)
-    local lua_path = "mods/" .. mod_dir .. "/init.lua"
-    local fnl_path = "mods/" .. mod_dir .. "/init.fnl"
-    local lua_info = love.filesystem.getInfo(lua_path)
-    local fnl_info = love.filesystem.getInfo(fnl_path)
-    local mod_path, mod_loader
+function kernel.actor:send(target_id, message, data)
+    local actor = self.actors[target_id]
+    if actor then
+        table.insert(actor.mailbox, {
+            type = message,
+            data = data,
+            timestamp = love.timer.getTime()
+        })
+    end
+end
 
-    if lua_info then
-        mod_path = "mods." .. mod_dir .. ".init"
-        mod_loader = require
-    elseif fnl_info and has_fennel then
-        mod_path = fnl_path
-        mod_loader = function(path)
-            local code = love.filesystem.read(path)
-            local lua_code = fennel.compileString(code, { filename = path })
-            local chunk, err = loadstring(lua_code, path)
-            if not chunk then
-                if config.debug_mode then print("Fennel compile error for " .. path .. ": " .. err) end
-                return nil
+function kernel.actor:broadcast(message, data)
+    for id, actor in pairs(self.actors) do
+        self:send(id, message, data)
+    end
+end
+
+function kernel.actor:process()
+    for id, actor in pairs(self.actors) do
+        while #actor.mailbox > 0 do
+            local msg = table.remove(actor.mailbox, 1)
+            local handler = actor.handlers[msg.type]
+            if handler then
+                handler(actor, msg.data)
             end
-            return chunk()
+        end
+    end
+end
+
+-- 节点树系统
+kernel.node = {
+    root = nil,
+    nodes = {}
+}
+
+function kernel.node:create(name, parent)
+    local node = {
+        name = name,
+        parent = parent,
+        children = {},
+        transform = {x = 0, y = 0, rotation = 0, scale = 1},
+        components = {},
+        active = true
+    }
+    
+    if parent then
+        table.insert(parent.children, node)
+    end
+    
+    self.nodes[name] = node
+    return node
+end
+
+function kernel.node:init()
+    self.root = self:create("root")
+    self:create("world", self.root)
+    self:create("ui", self.root)
+    self:create("network", self.root)
+    return self
+end
+
+-- 事件系统
+kernel.events = {
+    listeners = {},
+    queue = {}
+}
+
+function kernel.events:on(event, callback, priority)
+    priority = priority or 0
+    if not self.listeners[event] then
+        self.listeners[event] = {}
+    end
+    table.insert(self.listeners[event], {
+        callback = callback,
+        priority = priority
+    })
+    -- 按优先级排序
+    table.sort(self.listeners[event], function(a, b)
+        return a.priority > b.priority
+    end)
+end
+
+function kernel.events:emit(event, ...)
+    local handlers = self.listeners[event]
+    if handlers then
+        for _, handler in ipairs(handlers) do
+            local result = handler.callback(...)
+            if result == false then
+                break -- 允许中断事件链
+            end
+        end
+    end
+end
+
+function kernel.events:queue(event, data)
+    table.insert(self.queue, {event = event, data = data})
+end
+
+function kernel.events:process()
+    while #self.queue > 0 do
+        local e = table.remove(self.queue, 1)
+        self:emit(e.event, e.data)
+    end
+end
+
+-- Hook 系统（用于 Mod 扩展）
+function kernel.hooks:register(name, fn)
+    if not self[name] then
+        self[name] = {}
+    end
+    table.insert(self[name], fn)
+end
+
+function kernel.hooks:call(name, ...)
+    if self[name] then
+        local results = {}
+        for _, fn in ipairs(self[name]) do
+            local result = {fn(...)}
+            if #result > 0 then
+                table.insert(results, result)
+            end
+        end
+        return results
+    end
+end
+
+-- Mod 加载器
+kernel.modloader = {}
+
+function kernel.modloader:scan()
+    local mods = {}
+    local mod_dir = "mods"
+    
+    if love.filesystem.getInfo(mod_dir) then
+        local items = love.filesystem.getDirectoryItems(mod_dir)
+        for _, item in ipairs(items) do
+            local mod_path = mod_dir .. "/" .. item
+            if love.filesystem.getInfo(mod_path, "directory") then
+                -- 优先检查 init.fnl，然后 init.lua
+                local init_file = mod_path .. "/init"
+                if love.filesystem.getInfo(init_file .. ".fnl") or 
+                   love.filesystem.getInfo(init_file .. ".lua") then
+                    table.insert(mods, {
+                        name = item,
+                        path = "mods." .. item .. ".init"
+                    })
+                end
+            end
+        end
+    end
+    
+    return mods
+end
+
+function kernel.modloader:load(mod_info)
+    local success, mod = pcall(smartRequire, mod_info.path)
+    if success then
+        if type(mod) == "table" and mod.init then
+            local context = {
+                kernel = kernel,
+                events = kernel.events,
+                ecs = kernel.ecs,
+                actor = kernel.actor,
+                node = kernel.node,
+                hooks = kernel.hooks
+            }
+            mod:init(context)
+            kernel.mods[mod_info.name] = mod
+            print("[Mod] Loaded: " .. mod_info.name)
+            return true
+        else
+            print("[Mod] Failed: " .. mod_info.name .. " - Invalid mod structure")
         end
     else
-        if config.debug_mode then print("No init.lua or init.fnl found for mod " .. mod_dir) end
-        return
+        print("[Mod] Failed to load: " .. mod_info.name .. " - " .. tostring(mod))
     end
+    return false
+end
 
-    local ok, mod_module = pcall(mod_loader, mod_path)
-    if ok and mod_module and mod_module.init then
-        local init_ok, err = pcall(mod_module.init, api)
-        if init_ok then
-            mods[mod_dir] = { init = mod_module.init, reloaded = false, path = mod_path }
-        elseif config.debug_mode then
-            print("Mod " .. mod_dir .. " init error: " .. err)
-        end
-    elseif config.debug_mode then
-        print("Mod " .. mod_dir .. " load error: " .. (ok and "no init function" or mod_module))
+function kernel.modloader:loadAll()
+    local mods = self:scan()
+    
+    -- 按依赖顺序加载（这里简化为按字母顺序）
+    table.sort(mods, function(a, b)
+        -- core mod 总是第一个加载
+        if a.name == "core" then return true end
+        if b.name == "core" then return false end
+        return a.name < b.name
+    end)
+    
+    for _, mod_info in ipairs(mods) do
+        self:load(mod_info)
     end
 end
 
-local function reload_mod(mod_name)
-    local mod = mods[mod_name]
-    if mod then
-        package.loaded[mod.path] = nil
-        local ok, new_module = pcall(require, mod.path)
-        if ok and new_module and new_module.init then
-            local reload_ok, err = pcall(new_module.init, api)
-            if reload_ok then
-                mod.init = new_module.init
-                mod.reloaded = true
-                world:emit("mod-reloaded", mod_name)
-            elseif config.debug_mode then
-                print("Reload error for " .. mod_name .. ": " .. err)
-            end
-        elseif config.debug_mode then
-            print("Reload failed for " .. mod_name .. ": " .. (ok and "no init function" or new_module))
-        end
+-- 网络系统（基础框架）
+kernel.network = {
+    mode = "none", -- "server", "client", "none"
+    server = nil,
+    client = nil,
+    peers = {}
+}
+
+function kernel.network:init(mode, config)
+    self.mode = mode
+    if mode == "server" then
+        -- 服务器初始化逻辑
+        kernel.events:emit("network.server.start", config)
+    elseif mode == "client" then
+        -- 客户端初始化逻辑
+        kernel.events:emit("network.client.start", config)
     end
 end
 
-local function load_mods()
-    local mod_dirs = love.filesystem.getDirectoryItems("mods")
-    for _, dir in ipairs(mod_dirs) do
-        load_mod(dir)
-    end
-    world:emit("mods-loaded")
-end
-
--- Camera System
-local camera = { x = 0, y = 0, scale = 1 }
-
-local camera_system = concord.system({
-    players = { "player", "position" },
-    update = function(self, dt)
-        if #self.players > 0 then
-            local pos = self.players[1]:get("position").pos
-            local w = love.graphics.getWidth()
-            local h = love.graphics.getHeight()
-            camera.x = pos.x - w / 2
-            camera.y = pos.y - h / 2
-        end
-    end
-})
-
--- Chunk Management System
-local chunk_system = concord.system({
-    players = { "player", "position" },
-    update = function(self, dt)
-        if #self.players > 0 then
-            local pos = self.players[1]:get("position").pos
-            local pcx = math.floor(pos.x / (config.chunk_size * config.tile_size))
-            local pcy = math.floor(pos.y / (config.chunk_size * config.tile_size))
-            for cx = pcx - config.view_distance, pcx + config.view_distance do
-                for cy = pcy - config.view_distance, pcy + config.view_distance do
-                    load_chunk(cx, cy)
-                end
-            end
-            for key, _ in pairs(loaded_chunks) do
-                local cx, cy = key:match("(-?%d+),(-?%d+)")
-                cx, cy = tonumber(cx), tonumber(cy)
-                if math.abs(cx - pcx) > config.view_distance * 1.5 or math.abs(cy - pcy) > config.view_distance * 1.5 then
-                    unload_chunk(cx, cy)
-                end
-            end
-        end
-    end
-})
-
--- Love2D Callbacks
+-- Love2D 回调
 function love.load(args)
-    load_config()
-    love.filesystem.createDirectory(config.save_dir)
-    world:addSystem(camera_system)
-    world:addSystem(chunk_system)
-    load_mods()
+    -- 加载 Fennel
+    if loadFennel() then
+        print("[Kernel] Fennel compiler loaded")
+    else
+        print("[Kernel] Fennel not found, using Lua only")
+    end
+    
+    -- 初始化核心系统
+    kernel.ecs:init()
+    kernel.node:init()
+    
+    -- 加载所有 Mods
+    kernel.modloader:loadAll()
+    
+    -- 触发初始化事件
+    kernel.events:emit("kernel.init", kernel)
+    kernel.events:emit("game.load", args)
 end
 
 function love.update(dt)
-    world:update(dt)
+    -- 处理消息队列
+    kernel.actor:process()
+    kernel.events:process()
+    
+    -- 调用 Mod 钩子
+    kernel.hooks:call("update", dt)
+    
+    -- 更新 ECS
+    if kernel.ecs.world then
+        kernel.ecs.world:emit("update", dt)
+    end
+    
+    -- 触发更新事件
+    kernel.events:emit("game.update", dt)
 end
 
 function love.draw()
-    love.graphics.push()
-    love.graphics.translate(-camera.x, -camera.y)
-    love.graphics.scale(camera.scale)
-    world:draw()
-    love.graphics.pop()
+    -- 调用渲染钩子
+    kernel.hooks:call("predraw")
+    
+    -- ECS 渲染
+    if kernel.ecs.world then
+        kernel.ecs.world:emit("draw")
+    end
+    
+    -- 触发渲染事件
+    kernel.events:emit("game.draw")
+    
+    -- UI 渲染（最后）
+    kernel.hooks:call("postdraw")
 end
 
-function love.keypressed(key)
-    world:emit("keypressed", key)
-    if key == config.hot_reload_key then
-        for mod_name, _ in pairs(mods) do
-            reload_mod(mod_name)
-        end
-    end
+function love.keypressed(key, scancode, isrepeat)
+    kernel.events:emit("input.keypressed", key, scancode, isrepeat)
 end
 
-function love.errhand(msg)
-    print("Error: " .. msg)
-    if config.debug_mode then
-        love.system.openURL("https://love2d.org/wiki")
-    end
+function love.keyreleased(key, scancode)
+    kernel.events:emit("input.keyreleased", key, scancode)
 end
+
+function love.mousepressed(x, y, button)
+    kernel.events:emit("input.mousepressed", x, y, button)
+end
+
+function love.mousereleased(x, y, button)
+    kernel.events:emit("input.mousereleased", x, y, button)
+end
+
+function love.mousemoved(x, y, dx, dy)
+    kernel.events:emit("input.mousemoved", x, y, dx, dy)
+end
+
+function love.wheelmoved(x, y)
+    kernel.events:emit("input.wheelmoved", x, y)
+end
+
+function love.quit()
+    kernel.events:emit("game.quit")
+    kernel.hooks:call("quit")
+end
+
+-- 导出内核 API
+_G.kernel = kernel
+return kernel

@@ -1,8 +1,0 @@
-{
-  "tile-size": 32,
-  "chunk-size": 16,
-  "view-distance": 5,
-  "save-dir": "saves/",
-  "debug-mode": true,
-  "hot-reload-key": "f5"
-}
